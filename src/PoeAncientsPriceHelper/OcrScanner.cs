@@ -23,8 +23,8 @@ internal sealed class OcrScanner : IDisposable
 
     public OcrScanner(string tessdataDir, Action<string>? log = null)
     {
-        _engineCol = new TesseractEngine(tessdataDir, "eng", EngineMode.Default);
-        _engineSparse = new TesseractEngine(tessdataDir, "eng", EngineMode.Default);
+        _engineCol = new TesseractEngine(tessdataDir, "deu", EngineMode.Default);
+        _engineSparse = new TesseractEngine(tessdataDir, "deu", EngineMode.Default);
         _log = log;
     }
 
