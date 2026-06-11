@@ -82,6 +82,9 @@ public partial class MainWindow : MetroWindow
 
     private async Task StartupAsync()
     {
+        // Load German→English translations (for German PoE2 clients; optional, no-op if missing)
+        TranslationLoader.Load();
+
         StatusLabel.Text = "Fetching prices from poe.ninja…";
         StartStopButton.IsEnabled = false;
 

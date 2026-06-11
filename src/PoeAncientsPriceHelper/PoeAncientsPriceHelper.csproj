@@ -20,6 +20,9 @@
 
   <ItemGroup>
     <Resource Include="app.ico" />
+    <Content Include="..\..\translations.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>

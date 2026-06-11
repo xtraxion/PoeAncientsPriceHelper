@@ -258,13 +258,12 @@ internal sealed class ScanEngine : IDisposable
             }
 
             // Resolve the OCR'd name to a price key: exact → prefix → fuzzy (edit distance).
-            // The fuzzy step rescues single-character misreads ("viswn" → "vision"). The matched
-            // key (not the noisy OCR text) is stored as the row Name so the same item locks even
-            // when OCR jitters between passes.
+            // BEFORE lookup, translate German OCR text to English so poe.ninja prices match.
+            string translatedName = TranslationLoader.Translate(row.NormalizedName);
             PriceEntry? entry;
-            string matchedKey = row.NormalizedName;
+            string matchedKey = translatedName;
             bool exact = false;
-            if (snapshot.TryGetValue(row.NormalizedName, out entry))
+            if (snapshot.TryGetValue(translatedName, out entry))
             {
                 exact = true;
             }
