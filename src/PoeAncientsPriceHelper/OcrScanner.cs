@@ -15,7 +15,12 @@ internal sealed class OcrScanner : IDisposable
     private readonly Action<string>? _log;
     private readonly object _logLock = new();
     private const float MinConfidence = 10f;
-    private const int UpscaleFactor = 2;
+    private const int DefaultUpscaleFactor = 2;
+    // On 4K / high-DPI captures the text is already large. Upscaling it again with bicubic
+    // interpolation can soften glyph edges and make Tesseract read garbage like
+    // "croße" or "Entschlossenhc\eitRupe". Keep 2x for smaller/2K panels, but avoid
+    // extra scaling for tall 4K crops.
+    private const int HighDpiRegionHeightThreshold = 900;
     private const int MinNameLength = 4;
     // A real row must contain a word at least this long. 4 (not 5) so two-short-word names
     // like "Void Flux" survive; OCR fragments are still mostly 1–3 char tokens.
@@ -43,7 +48,8 @@ internal sealed class OcrScanner : IDisposable
         int cropW = Math.Max(1, regionBitmap.Width - leftCut - rightCut);
         using var cropped = CropBitmap(regionBitmap, leftCut, 0, cropW, regionBitmap.Height);
         using var inverted = Preprocess(cropped);
-        using var upscaled = Upscale(inverted, UpscaleFactor);
+        int scale = GetUpscaleFactor(inverted);
+        using var upscaled = Upscale(inverted, scale);
         byte[] png = ToPng(upscaled);
         int height = regionBitmap.Height;
 
@@ -51,8 +57,8 @@ internal sealed class OcrScanner : IDisposable
         // halve latency. SingleColumn reads ordinary lists cleanly; SparseText rescues panels whose
         // strong beveled row dividers make the other modes see only the top line. At each row keep
         // whichever pass produced the fuller text.
-        var tCol = Task.Run(() => RunPass(_engineCol, png, PageSegMode.SingleColumn, height));
-        var tSparse = Task.Run(() => RunPass(_engineSparse, png, PageSegMode.SparseText, height));
+        var tCol = Task.Run(() => RunPass(_engineCol, png, PageSegMode.SingleColumn, height, scale));
+        var tSparse = Task.Run(() => RunPass(_engineSparse, png, PageSegMode.SparseText, height, scale));
         Task.WaitAll(tCol, tSparse);
         var rows = MergeByPosition(tCol.Result, tSparse.Result);
 
@@ -65,11 +71,16 @@ internal sealed class OcrScanner : IDisposable
         return rows;
     }
 
-    private IReadOnlyList<OcrRow> RunPass(TesseractEngine engine, byte[] png, PageSegMode mode, int regionHeight)
+    private IReadOnlyList<OcrRow> RunPass(TesseractEngine engine, byte[] png, PageSegMode mode, int regionHeight, int scale)
     {
         using var pix = Pix.LoadFromMemory(png);
         using var page = engine.Process(pix, mode);
-        return ExtractRows(page, regionHeight, UpscaleFactor);
+        return ExtractRows(page, regionHeight, scale);
+    }
+
+    private static int GetUpscaleFactor(Bitmap src)
+    {
+        return src.Height >= HighDpiRegionHeightThreshold ? 1 : DefaultUpscaleFactor;
     }
 
     private static IReadOnlyList<OcrRow> MergeByPosition(IReadOnlyList<OcrRow> a, IReadOnlyList<OcrRow> b)
