@@ -25,7 +25,7 @@ internal sealed class PriceRepository : IDisposable
     // thread-pool thread; subscribers must marshal to the UI thread.
     public event Action? PricesUpdated;
 
-    private static readonly string[] ExchangeTypes = ["Verisium", "Runes", "Expedition", "Currency"];
+    private static readonly string[] ExchangeTypes = ["Verisium", "Runes", "Expedition", "Currency", "UncutGems"];
 
     public PriceRepository(HttpClient http) => _http = http;
 
