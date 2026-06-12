@@ -15,12 +15,12 @@ internal sealed class OcrScanner : IDisposable
     private readonly Action<string>? _log;
     private readonly object _logLock = new();
     private const float MinConfidence = 10f;
-    private const int DefaultUpscaleFactor = 2;
-    // On 4K / high-DPI captures the text is already large. Upscaling it again with bicubic
-    // interpolation can soften glyph edges and make Tesseract read garbage like
-    // "croße" or "Entschlossenhc\eitRupe". Keep 2x for smaller/2K panels, but avoid
-    // extra scaling for tall 4K crops.
+    private const double DefaultOcrScaleFactor = 2.0;
+    // On 4K / high-DPI captures the text is already too large for stable Tesseract line
+    // segmentation. Normalize tall captures down to a target height instead of OCRing the
+    // full 1000+ px crop. This prevents rows from breaking into fragments like "PEn OS A".
     private const int HighDpiRegionHeightThreshold = 900;
+    private const int HighDpiTargetHeight = 650;
     private const int MinNameLength = 4;
     // A real row must contain a word at least this long. 4 (not 5) so two-short-word names
     // like "Void Flux" survive; OCR fragments are still mostly 1–3 char tokens.
@@ -48,8 +48,8 @@ internal sealed class OcrScanner : IDisposable
         int cropW = Math.Max(1, regionBitmap.Width - leftCut - rightCut);
         using var cropped = CropBitmap(regionBitmap, leftCut, 0, cropW, regionBitmap.Height);
         using var inverted = Preprocess(cropped);
-        int scale = GetUpscaleFactor(inverted);
-        using var upscaled = Upscale(inverted, scale);
+        double scale = GetOcrScaleFactor(inverted);
+        using var upscaled = ScaleBitmap(inverted, scale);
         byte[] png = ToPng(upscaled);
         int height = regionBitmap.Height;
 
@@ -71,16 +71,18 @@ internal sealed class OcrScanner : IDisposable
         return rows;
     }
 
-    private IReadOnlyList<OcrRow> RunPass(TesseractEngine engine, byte[] png, PageSegMode mode, int regionHeight, int scale)
+    private IReadOnlyList<OcrRow> RunPass(TesseractEngine engine, byte[] png, PageSegMode mode, int regionHeight, double scale)
     {
         using var pix = Pix.LoadFromMemory(png);
         using var page = engine.Process(pix, mode);
         return ExtractRows(page, regionHeight, scale);
     }
 
-    private static int GetUpscaleFactor(Bitmap src)
+    private static double GetOcrScaleFactor(Bitmap src)
     {
-        return src.Height >= HighDpiRegionHeightThreshold ? 1 : DefaultUpscaleFactor;
+        if (src.Height >= HighDpiRegionHeightThreshold)
+            return Math.Max(0.5, HighDpiTargetHeight / (double)src.Height);
+        return DefaultOcrScaleFactor;
     }
 
     private static IReadOnlyList<OcrRow> MergeByPosition(IReadOnlyList<OcrRow> a, IReadOnlyList<OcrRow> b)
@@ -109,7 +111,7 @@ internal sealed class OcrScanner : IDisposable
         return dst;
     }
 
-    private IReadOnlyList<OcrRow> ExtractRows(Page page, int bitmapHeight, int scale = 1)
+    private IReadOnlyList<OcrRow> ExtractRows(Page page, int bitmapHeight, double scale = 1.0)
     {
         var rows = new List<OcrRow>();
         var diag = new List<string>();
@@ -121,7 +123,7 @@ internal sealed class OcrScanner : IDisposable
             var text = iter.GetText(PageIteratorLevel.TextLine);
             float conf = iter.GetConfidence(PageIteratorLevel.TextLine);
             // Bounding box coords are in upscaled space — divide back to original coords
-            int centerY = Math.Clamp((box.Y1 + (box.Y2 - box.Y1) / 2) / scale, 0, bitmapHeight - 1);
+            int centerY = Math.Clamp((int)Math.Round((box.Y1 + (box.Y2 - box.Y1) / 2.0) / scale), 0, bitmapHeight - 1);
 
             string? reject = null;
             string normalized = "";
@@ -152,11 +154,15 @@ internal sealed class OcrScanner : IDisposable
         return rows;
     }
 
-    private static Bitmap Upscale(Bitmap src, int factor)
+    private static Bitmap ScaleBitmap(Bitmap src, double factor)
     {
-        var dst = new Bitmap(src.Width * factor, src.Height * factor, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+        int dstW = Math.Max(1, (int)Math.Round(src.Width * factor));
+        int dstH = Math.Max(1, (int)Math.Round(src.Height * factor));
+        var dst = new Bitmap(dstW, dstH, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
         using var g = Graphics.FromImage(dst);
-        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+        g.InterpolationMode = factor < 1.0
+            ? System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear
+            : System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
         g.DrawImage(src, 0, 0, dst.Width, dst.Height);
         return dst;
     }
