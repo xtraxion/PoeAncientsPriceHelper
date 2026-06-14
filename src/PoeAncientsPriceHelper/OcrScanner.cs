@@ -20,7 +20,7 @@ internal sealed class OcrScanner : IDisposable
     // segmentation. Normalize tall captures down to a target height instead of OCRing the
     // full 1000+ px crop. This prevents rows from breaking into fragments like "PEn OS A".
     private const int HighDpiRegionHeightThreshold = 900;
-    private const int HighDpiTargetHeight = 650;
+    private const int HighDpiTargetHeight = 900;
     private const int MinNameLength = 4;
     // A real row must contain a word at least this long. 4 (not 5) so two-short-word names
     // like "Void Flux" survive; OCR fragments are still mostly 1–3 char tokens.
