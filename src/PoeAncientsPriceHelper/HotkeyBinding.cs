@@ -11,12 +11,13 @@ internal static class HotkeyBinding
 {
     public const KeyCode Default = KeyCode.VcF5;
 
-    // The three rebindable actions. Used to tell capture which binding it's replacing so it can reject
-    // a key already taken by one of the *other two* (a collision check that lives in App, where the
+    // The four rebindable actions. Used to tell capture which binding it's replacing so it can reject
+    // a key already taken by one of the *others* (a collision check that lives in App, where the
     // current bindings are held).
-    public enum Action { StartStop, Debug, Calibrate }
+    public enum Action { StartStop, Debug, Calibrate, Currency }
 
     public const KeyCode DefaultStartStop = KeyCode.VcF5;
+    public const KeyCode DefaultCurrency = KeyCode.VcF6;
     public const KeyCode DefaultDebug = KeyCode.VcF3;
     public const KeyCode DefaultCalibrate = KeyCode.VcF4;
 
