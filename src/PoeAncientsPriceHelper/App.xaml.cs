@@ -16,9 +16,11 @@ public partial class App : System.Windows.Application
     // The currently-bound hotkeys, matched on every key event. MainWindow pushes the persisted values
     // once config is loaded and again on each rebind; until then the historical defaults keep working.
     private static volatile KeyCode _startStopKey = HotkeyBinding.DefaultStartStop;
+    private static volatile KeyCode _currencyKey = HotkeyBinding.DefaultCurrency;
     private static volatile KeyCode _debugKey = HotkeyBinding.DefaultDebug;
     private static volatile KeyCode _calibrateKey = HotkeyBinding.DefaultCalibrate;
     internal static void SetStartStopKey(KeyCode key) => _startStopKey = key;
+    internal static void SetCurrencyKey(KeyCode key) => _currencyKey = key;
     internal static void SetDebugKey(KeyCode key) => _debugKey = key;
     internal static void SetCalibrateKey(KeyCode key) => _calibrateKey = key;
 
@@ -106,6 +108,7 @@ public partial class App : System.Windows.Application
             // Act on release (not press) so holding a key can't auto-repeat-fire many times.
             if (code == _debugKey) PriceOverlayManager.ToggleDebug();
             else if (code == _calibrateKey) InvokeCalibrate();
+            else if (code == _currencyKey) InvokeCurrencyScan();
             else if (code == _startStopKey) InvokeStartStopToggle();
             else if (code is KeyCode.VcLeftControl) _leftCtrlDown = false;
         };
@@ -132,12 +135,13 @@ public partial class App : System.Windows.Application
         FinishCapture(CaptureOutcome.Captured, code);
     }
 
-    // True if the key is already bound to one of the two actions that isn't the one being rebound —
+    // True if the key is already bound to one of the actions that isn't the one being rebound —
     // binding it would make a single press fire two actions. The action being rebound is skipped so
     // re-confirming its own current key is allowed.
     private static bool CollidesWithOtherAction(KeyCode code, HotkeyBinding.Action target)
     {
         if (target != HotkeyBinding.Action.StartStop && code == _startStopKey) return true;
+        if (target != HotkeyBinding.Action.Currency && code == _currencyKey) return true;
         if (target != HotkeyBinding.Action.Debug && code == _debugKey) return true;
         if (target != HotkeyBinding.Action.Calibrate && code == _calibrateKey) return true;
         return false;
@@ -162,6 +166,9 @@ public partial class App : System.Windows.Application
 
     private static void InvokeStartStopToggle() =>
         Current?.Dispatcher.BeginInvoke(() => (Current.MainWindow as MainWindow)?.ToggleStartStop());
+
+    private static void InvokeCurrencyScan() =>
+        Current?.Dispatcher.BeginInvoke(() => (Current.MainWindow as MainWindow)?.RunCurrencyScan());
 
     private static void InvokeCalibrate() =>
         Current?.Dispatcher.BeginInvoke(() => (Current.MainWindow as MainWindow)?.RunCalibration());
