@@ -315,6 +315,9 @@ public partial class MainWindow : MetroWindow
     private void RebindButton_Click(object sender, RoutedEventArgs e) =>
         BeginRebind(HotkeyBinding.Action.StartStop, RebindButton, HotkeyLabel);
 
+    private void RebindCurrencyButton_Click(object sender, RoutedEventArgs e) =>
+        BeginRebind(HotkeyBinding.Action.Currency, RebindCurrencyButton, CurrencyHotkeyLabel);
+
     private void RebindDebugButton_Click(object sender, RoutedEventArgs e) =>
         BeginRebind(HotkeyBinding.Action.Debug, RebindDebugButton, DebugHotkeyLabel);
 
@@ -344,6 +347,10 @@ public partial class MainWindow : MetroWindow
                     case HotkeyBinding.Action.StartStop:
                         _config.StartStopHotkey = HotkeyBinding.ToStorage(code);
                         App.SetStartStopKey(code);
+                        break;
+                    case HotkeyBinding.Action.Currency:
+                        _config.CurrencyHotkey = HotkeyBinding.ToStorage(code);
+                        App.SetCurrencyKey(code);
                         break;
                     case HotkeyBinding.Action.Debug:
                         _config.DebugHotkey = HotkeyBinding.ToStorage(code);
@@ -380,6 +387,7 @@ public partial class MainWindow : MetroWindow
     private void SetRebindButtonsEnabled(bool enabled)
     {
         RebindButton.IsEnabled = enabled;
+        RebindCurrencyButton.IsEnabled = enabled;
         RebindDebugButton.IsEnabled = enabled;
         RebindCalibrateButton.IsEnabled = enabled;
     }
