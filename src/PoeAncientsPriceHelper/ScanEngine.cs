@@ -342,7 +342,7 @@ internal sealed class ScanEngine : IDisposable
     // Closest price key to an OCR'd name by Levenshtein similarity, or null if nothing clears
     // FuzzyThreshold. Only candidates within ±3 of the name's length are considered (cheaper,
     // and a large length gap is never a near-match).
-    private static string? BestFuzzy(IReadOnlyDictionary<string, PriceEntry> snapshot, string name)
+    internal static string? BestFuzzy(IReadOnlyDictionary<string, PriceEntry> snapshot, string name)
     {
         string? best = null;
         double bestScore = FuzzyThreshold;   // must strictly exceed the threshold to win
