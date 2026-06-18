@@ -103,14 +103,17 @@ public partial class MainWindow : MetroWindow
         LeagueBox.SelectedItem = _config.AvailableLeagues.Contains(_config.LeagueName)
             ? _config.LeagueName
             : _config.AvailableLeagues.FirstOrDefault();
-        // Arm the global hook with all three persisted bindings and mirror them into the labels.
+        // Arm the global hook with all four persisted bindings and mirror them into the labels.
         var startStop = HotkeyBinding.Parse(_config.StartStopHotkey);
+        var currency = HotkeyBinding.Parse(_config.CurrencyHotkey);
         var debug = HotkeyBinding.Parse(_config.DebugHotkey);
         var calibrate = HotkeyBinding.Parse(_config.CalibrateHotkey);
         HotkeyLabel.Text = HotkeyBinding.Display(startStop);
+        CurrencyHotkeyLabel.Text = HotkeyBinding.Display(currency);
         DebugHotkeyLabel.Text = HotkeyBinding.Display(debug);
         CalibrateHotkeyLabel.Text = HotkeyBinding.Display(calibrate);
         App.SetStartStopKey(startStop);
+        App.SetCurrencyKey(currency);
         App.SetDebugKey(debug);
         App.SetCalibrateKey(calibrate);
         UpdateRegionLabel();
@@ -213,6 +216,25 @@ public partial class MainWindow : MetroWindow
             StartStopButton.Content = "Start";
             StartStopButton.Background = System.Windows.Media.Brushes.DarkGreen;
         }
+    }
+
+    // internal so the App-level hook (configurable Currency key) can trigger it too.
+    internal void RunCurrencyScan()
+    {
+        if (!_config.IsCalibrated || _repo is null || _icons is null) return;
+
+        using var scanner = new CurrencyScanner(_config, _repo, _icons);
+        var rows = scanner.ScanOnce(columnCount: 3);
+        if (rows.Count == 0) return;
+
+        // Show results in a dedicated window (sorted, scrollable, auto-closing).
+        var pricedRows = rows.ToList();
+        var form = new CurrencyResultForm(pricedRows, _icons);
+        // Position near the calibrated region but not overlapping it
+        var region = _config.RegionRect;
+        form.StartPosition = FormStartPosition.Manual;
+        form.Location = new System.Drawing.Point(region.X + region.Width + 20, region.Y);
+        form.Show();
     }
 
     // Minimize → hide the window and drop to the tray (scanning keeps running). Restore/Exit live on
