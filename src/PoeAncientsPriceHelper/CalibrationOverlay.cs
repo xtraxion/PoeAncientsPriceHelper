@@ -4,21 +4,26 @@ using System.Windows.Forms;
 
 namespace PoeAncientsPriceHelper;
 
-// Full-screen drag-to-select overlay. User draws a rectangle over the list panel.
-// Returns the selected RegionRect and the reference pixel color sampled at its centre.
+// Full-screen drag-to-select overlay spanning the whole virtual desktop. User draws a rectangle over
+// the list panel; RegionRectResult is returned in ABSOLUTE PHYSICAL screen pixels.
+//
+// All selection geometry is tracked via Cursor.Position (absolute physical coords) rather than the
+// form's client coordinates. The form spans monitors that can have different DPIs, and a single window
+// has one DPI context, so client coords are unreliable across the DPI boundary — but the global cursor
+// position is consistent physical-desktop space (the process is Per-Monitor-V2 aware via app.manifest).
+// Painting converts those physical coords back to client space for display (RectangleToClient).
 internal sealed class CalibrationOverlay : Form
 {
     public Rectangle RegionRectResult { get; private set; }
 
-    private Point? _dragStart;
-    private Rectangle _currentDrag;
-    private Rectangle _confirmedRect;
+    private Point? _dragStartScreen;        // absolute physical screen coords
+    private Rectangle _currentDragScreen;   // absolute physical screen coords
+    private Rectangle _confirmedRectScreen; // absolute physical screen coords
     private readonly Bitmap _screenSnapshot;
 
     public CalibrationOverlay()
     {
         FormBorderStyle = FormBorderStyle.None;
-        WindowState = FormWindowState.Maximized;
         TopMost = true;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
@@ -29,7 +34,12 @@ internal sealed class CalibrationOverlay : Form
         Cursor = Cursors.Cross;
         Text = "PoeAncientsPriceHelper - Calibration";
 
-        var bounds = Screen.PrimaryScreen!.Bounds;
+        // Span the whole virtual desktop (all monitors) so the region can be drawn on any of them, not
+        // just the primary (#3). On multi-monitor setups VirtualScreen.Location can be negative (a
+        // monitor left/above the primary); mouse points are form-client coords, so the selected rect is
+        // offset by Bounds.Location back into absolute screen coords in OnMouseUp. WindowState.Maximized
+        // would only fill one monitor, so it's gone — Bounds drives the size instead.
+        var bounds = SystemInformation.VirtualScreen;
         Bounds = bounds;
 
         _screenSnapshot = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format24bppRgb);
@@ -46,35 +56,38 @@ internal sealed class CalibrationOverlay : Form
     protected override void OnMouseDown(MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Left)
-        { _dragStart = e.Location; _currentDrag = Rectangle.Empty; }
+        { _dragStartScreen = Cursor.Position; _currentDragScreen = Rectangle.Empty; }
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
-        if (_dragStart is { } s)
+        if (_dragStartScreen is { } s)
         {
-            _currentDrag = Rectangle.FromLTRB(
-                Math.Min(s.X, e.X), Math.Min(s.Y, e.Y),
-                Math.Max(s.X, e.X), Math.Max(s.Y, e.Y));
+            var p = Cursor.Position;   // absolute physical screen coords
+            _currentDragScreen = Rectangle.FromLTRB(
+                Math.Min(s.X, p.X), Math.Min(s.Y, p.Y),
+                Math.Max(s.X, p.X), Math.Max(s.Y, p.Y));
             Invalidate();
         }
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
-        if (_dragStart is null || _currentDrag.Width < 3 || _currentDrag.Height < 3)
-        { _dragStart = null; _currentDrag = Rectangle.Empty; Invalidate(); return; }
-        _dragStart = null;
-        _confirmedRect = _currentDrag;
+        if (_dragStartScreen is null || _currentDragScreen.Width < 3 || _currentDragScreen.Height < 3)
+        { _dragStartScreen = null; _currentDragScreen = Rectangle.Empty; Invalidate(); return; }
+        _dragStartScreen = null;
+        _confirmedRectScreen = _currentDragScreen;
         Invalidate();
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
         if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); return; }
-        if ((e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) && _confirmedRect.Width > 0)
+        if ((e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) && _confirmedRectScreen.Width > 0)
         {
-            RegionRectResult = _confirmedRect;
+            // Already absolute physical screen coords (captured from Cursor.Position) — exactly what
+            // ScreenCapture/overlay positioning expect under Per-Monitor-V2 awareness.
+            RegionRectResult = _confirmedRectScreen;
             DialogResult = DialogResult.OK;
             Close();
         }
@@ -87,19 +100,27 @@ internal sealed class CalibrationOverlay : Form
         using var titleFont = new Font("Segoe UI", 18, FontStyle.Bold);
         using var subFont = new Font("Segoe UI", 12, FontStyle.Regular);
         using var fg = new SolidBrush(Color.White);
+
+        // Pin the instructions to the PRIMARY monitor (mapped from physical → client) so they never land
+        // on whichever monitor happens to sit at the virtual-desktop origin (the old bug: text on the
+        // secondary). The selection rects are stored in physical coords, so convert them for drawing.
+        var primary = Screen.PrimaryScreen!.Bounds;
+        var titleAt = PointToClient(new Point(primary.Left + 30, primary.Top + 30));
         g.DrawString("Drag a box around the item list panel, then press ENTER to confirm. ESC to cancel.",
-            titleFont, fg, 30, 30);
-        if (_currentDrag.Width > 0)
+            titleFont, fg, titleAt.X, titleAt.Y);
+
+        if (_currentDragScreen.Width > 0)
         {
             using var pen = new Pen(Color.OrangeRed, 2) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dash };
-            g.DrawRectangle(pen, _currentDrag);
+            g.DrawRectangle(pen, RectangleToClient(_currentDragScreen));
         }
-        if (_confirmedRect.Width > 0)
+        if (_confirmedRectScreen.Width > 0)
         {
+            var clientRect = RectangleToClient(_confirmedRectScreen);
             using var pen2 = new Pen(Color.LimeGreen, 3);
-            g.DrawRectangle(pen2, _confirmedRect);
+            g.DrawRectangle(pen2, clientRect);
             g.DrawString("Press ENTER to confirm, drag to redo", subFont, fg,
-                _confirmedRect.Left, _confirmedRect.Bottom + 6);
+                clientRect.Left, clientRect.Bottom + 6);
         }
     }
 
@@ -108,7 +129,9 @@ internal sealed class CalibrationOverlay : Form
         Rectangle? result = null;
         var thread = new Thread(() =>
         {
-            System.Windows.Forms.Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+            // DPI awareness is set process-wide via app.manifest (Per-Monitor-V2). The old
+            // Application.SetHighDpiMode(PerMonitorV2) call here was a no-op — the WPF process had
+            // already locked its DPI mode by the time calibration runs.
             using var form = new CalibrationOverlay();
             if (form.ShowDialog() == DialogResult.OK)
                 result = form.RegionRectResult;

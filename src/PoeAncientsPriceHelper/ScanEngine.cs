@@ -72,7 +72,7 @@ internal sealed class ScanEngine : IDisposable
 
         Log($"START prices={_prices.ItemCount} icons={_icons.IsAvailable} region={_config.RegionRect}");
 
-        using var scanner = new OcrScanner(tessdataDir, Log);
+        using var scanner = new OcrScanner(tessdataDir, Log, App.DebugMode);
         var detector = new ListDetector();
         var sw = Stopwatch.StartNew();
         var slots = new List<RowSlot>();             // per-row accumulator: priced rows lock, misses keep retrying
@@ -81,6 +81,12 @@ internal sealed class ScanEngine : IDisposable
         const int TopmostEveryN = 10;
         bool isOpen = false;          // brightness gate: bright enough to attempt OCR
         bool confirmedOpen = false;   // OCR actually found a list — only then show the overlay
+        // After a dismiss (ESC / Ctrl+click) the brightness gate can re-trip on ambient light that
+        // grazes the threshold (the game world after the panel closes reads almost as bright as a real
+        // panel — measured 105 vs a real panel's 101). That re-show is the post-ESC flicker. While this
+        // is set, the brightness-only "reading…" hint is suppressed: nothing shows until OCR actually
+        // confirms a priced row again. Cleared on the next real confirm.
+        bool suppressHintUntilConfirm = false;
         int brightStreak = 0;
         int darkStreak = 0;
         int dismissDark = 0;          // dark frames seen while dismissed — releases the latch when the panel closes
@@ -90,6 +96,13 @@ internal sealed class ScanEngine : IDisposable
         const int OpenCycleMs = 100;                 // tight loop while scanning
         const int ClosedCycleMs = 150;               // polling while watching for the panel — snappy detection
         const int DarkToRelease = 3;                 // dark frames before a dismiss latch releases
+        // Asymmetric brightness hysteresis. A frame counts toward OPENING only above OpenBrightness and
+        // toward CLOSING only below CloseBrightness; readings in the [80,100] dead zone hold the current
+        // state so brightness hovering at the boundary can't flicker the overlay. OpenBrightness stays
+        // at the detector's old threshold (100) on purpose — real panels read as low as 101, so raising
+        // it would miss dim ones; the confirm-gate (above) is what rejects bright-but-fake frames.
+        const int OpenBrightness = 100;
+        const int CloseBrightness = 80;
 
         PriceOverlayManager.EnsureVisible(_config.RegionRect, _config.OverlayXOffset, _icons);
         Log("overlay ready");
@@ -101,16 +114,25 @@ internal sealed class ScanEngine : IDisposable
             try
             {
                 using var bmp = ScreenCapture.CaptureRegion(_config.RegionRect);
-                bool rawBright = detector.IsOpen(bmp, out var sampledPixel);
+                detector.IsOpen(bmp, out var sampledPixel);   // bool unused — we apply our own hysteresis
+                int brightness = (sampledPixel.R + sampledPixel.G + sampledPixel.B) / 3;
+                bool brightFrame = brightness > OpenBrightness;   // strong enough to count toward opening
+                bool darkFrame = brightness < CloseBrightness;    // dim enough to count toward closing
 
                 // Dismissed (ESC / Left-Ctrl+click): stay hidden and don't scan until the panel
-                // actually closes (a few dark frames). ESC closes the panel so this clears quickly;
-                // Ctrl+click keeps it open, so the overlay stays dismissed (no flicker) until the
-                // user closes the panel — then a fresh open shows prices again.
+                // actually closes (a few genuinely dark frames). ESC closes the panel so this clears
+                // quickly; Ctrl+click keeps it open, so the overlay stays dismissed (no flicker) until
+                // the user closes the panel. On release, arm hint-suppression so the next brightness
+                // blip can't re-show the overlay before OCR re-confirms a real panel.
                 if (_dismissed)
                 {
-                    if (rawBright) dismissDark = 0; else dismissDark++;
-                    if (dismissDark >= DarkToRelease) { _dismissed = false; Log("dismiss released (panel closed)"); }
+                    if (darkFrame) dismissDark++; else dismissDark = 0;
+                    if (dismissDark >= DarkToRelease)
+                    {
+                        _dismissed = false;
+                        suppressHintUntilConfirm = true;
+                        Log("dismiss released (panel closed)");
+                    }
                     isOpen = false; confirmedOpen = false; brightStreak = 0; darkStreak = 0;
                     slots.Clear(); lastRows = [];
                     _showing = false;
@@ -120,9 +142,11 @@ internal sealed class ScanEngine : IDisposable
                 {
                     dismissDark = 0;
 
-                    // Hysteresis: 2 consecutive bright frames to open, 3 dark frames to close.
-                    if (rawBright) { brightStreak++; darkStreak = 0; }
-                    else { darkStreak++; brightStreak = 0; }
+                    // Hysteresis: 2 consecutive bright frames to open, 3 dark frames to close; readings
+                    // in the [CloseBrightness, OpenBrightness] dead zone hold the current state.
+                    if (brightFrame) { brightStreak++; darkStreak = 0; }
+                    else if (darkFrame) { darkStreak++; brightStreak = 0; }
+                    else { brightStreak = 0; darkStreak = 0; }
                     bool prevIsOpen = isOpen;
                     if (!isOpen && brightStreak >= 2) isOpen = true;
                     else if (isOpen && darkStreak >= 3) isOpen = false;
@@ -130,20 +154,20 @@ internal sealed class ScanEngine : IDisposable
                     // Heartbeat every ~5s so we know the loop is alive
                     if (cycleCount % 12 == 0)
                     {
-                        int brightness = (sampledPixel.R + sampledPixel.G + sampledPixel.B) / 3;
                         Log($"heartbeat cycle={cycleCount} panelOpen={isOpen} confirmed={confirmedOpen} region={_config.RegionRect} rows={lastRows.Count} " +
                             $"avgPixel=#{sampledPixel.R:X2}{sampledPixel.G:X2}{sampledPixel.B:X2} brightness={brightness}");
                     }
 
                     if (isOpen != prevIsOpen)
                     {
-                        int b = (sampledPixel.R + sampledPixel.G + sampledPixel.B) / 3;
-                        Log($"panel {(isOpen ? "OPEN" : "CLOSED")} brightness={b} " +
+                        Log($"panel {(isOpen ? "OPEN" : "CLOSED")} brightness={brightness} " +
                             $"avgPixel=#{sampledPixel.R:X2}{sampledPixel.G:X2}{sampledPixel.B:X2}");
 
-                        // Panel just detected — show the "reading…" hint right away, before the
-                        // first (200–400ms) OCR runs, so the wait isn't a blank screen.
-                        if (isOpen)
+                        // Panel just detected — show the "reading…" hint right away, before the first
+                        // (200–400ms) OCR runs, so the wait isn't a blank screen. But right after a
+                        // dismiss, suppress it: a brightness blip that isn't a real panel never
+                        // confirms, so showing the hint here is exactly the post-ESC flicker.
+                        if (isOpen && !suppressHintUntilConfirm)
                         {
                             _showing = false;
                             PriceOverlayManager.UpdateState([], false, true);
@@ -175,6 +199,7 @@ internal sealed class ScanEngine : IDisposable
                                 if (!confirmedOpen && reads.Any(r => r.HasPrice))
                                 {
                                     confirmedOpen = true;
+                                    suppressHintUntilConfirm = false;   // a real panel is back — re-enable the hint
                                     Log("panel CONFIRMED (priced row found)");
                                 }
 
@@ -192,7 +217,8 @@ internal sealed class ScanEngine : IDisposable
                     }
 
                     // "reading" = brightness says a panel is up but OCR hasn't confirmed prices yet.
-                    bool reading = isOpen && !confirmedOpen;
+                    // Suppressed straight after a dismiss until a real confirm (anti-flicker, see above).
+                    bool reading = isOpen && !confirmedOpen && !suppressHintUntilConfirm;
 
                     // Show prices only once OCR has confirmed a real list, not on brightness alone.
                     _showing = confirmedOpen;
@@ -241,6 +267,24 @@ internal sealed class ScanEngine : IDisposable
                 Math.Abs(prevY - row.CenterY) < 5)
                 stableY = prevY;
             newPositions[row.NormalizedName] = stableY;
+
+            // Uncut gems (skill / spirit / support) are priced PER LEVEL, and adjacent levels differ
+            // several-fold (e.g. spirit gem L18 ≈ 0.027 div vs L19 ≈ 0.143 div). The only things that
+            // distinguish one gem line from another are the TYPE word and the LEVEL number, so we pin
+            // both EXACTLY and deliberately skip the prefix/fuzzy fallbacks here: a single-character OCR
+            // slip on the digit (or skill↔spirit) would otherwise lock a confidently-wrong, multiples-off
+            // price. If the type or level can't be read cleanly, the row shows '?' until a clean read
+            // arrives — better than guessing a neighbouring level.
+            if (TryResolveGemKey(row.NormalizedName, out var gemKey))
+            {
+                if (gemKey is not null && snapshot.TryGetValue(gemKey, out var gemEntry))
+                    rows.Add(new PriceRow(stableY, row.RawText, gemEntry.DivineValue, gemEntry.ExaltedValue,
+                        true, row.Multiplier, gemKey, true));
+                else
+                    // Recognised as an uncut gem but type+level didn't pin to a known price → '?', never fuzzy.
+                    rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, false, row.Multiplier, row.NormalizedName));
+                continue;
+            }
 
             // Easter eggs: certain OCR'd names render as a gag icon + caption instead of a price.
             // ExactMatch=true so they lock on the first read like a real priced row.
@@ -310,6 +354,23 @@ internal sealed class ScanEngine : IDisposable
             if (score > bestScore) { bestScore = score; best = key; }
         }
         return best;
+    }
+
+    // Detect an uncut gem and pin its identity. Returns true when the name is an uncut gem (a type
+    // word skill/spirit/support together with "gem"); the discriminating type word and "gem" are what
+    // mark it, so a slip in the boilerplate words ("uncot", "levei") doesn't hide a gem. When a level
+    // number is also present, `key` is the canonical price key with the type and level pinned exactly
+    // (no fuzzy) — caller looks it up as-is. When the level can't be read, `key` is null so the caller
+    // shows '?' rather than guessing an adjacent level (which can be several-fold off).
+    internal static bool TryResolveGemKey(string normalizedName, out string? key)
+    {
+        key = null;
+        if (!normalizedName.Contains("gem")) return false;
+        var type = Regex.Match(normalizedName, @"\b(skill|spirit|support)\b");
+        if (!type.Success) return false;
+        var lvl = Regex.Match(normalizedName, @"\blevel\s+(\d+)\b");
+        if (lvl.Success) key = $"uncut {type.Groups[1].Value} gem level {lvl.Groups[1].Value}";
+        return true;
     }
 
     internal static int Levenshtein(string a, string b)

@@ -15,6 +15,9 @@ internal sealed class PriceRepository : IDisposable
     private volatile IReadOnlyDictionary<string, PriceEntry> _prices =
         new ReadOnlyDictionary<string, PriceEntry>(new Dictionary<string, PriceEntry>());
     private System.Threading.Timer? _timer;
+    // Cancelled on Dispose so a fetch in flight at shutdown (or one stuck behind the HttpClient
+    // timeout) is abandoned cleanly instead of running on against a disposed client.
+    private readonly CancellationTokenSource _cts = new();
 
     public IReadOnlyDictionary<string, PriceEntry> Prices => _prices;
     public DateTime? LastFetchedAt { get; private set; }
@@ -25,30 +28,35 @@ internal sealed class PriceRepository : IDisposable
     // thread-pool thread; subscribers must marshal to the UI thread.
     public event Action? PricesUpdated;
 
+    // UncutGems shares the exact same response shape as the others: a root items[] maps each
+    // line id (e.g. "uncut-spirit-gem-19") to a display name that already carries the level
+    // ("Uncut Spirit Gem (Level 19)"), which NormalizeName reduces to "uncut spirit gem level 19" —
+    // the same string the OCR produces. So no special parsing is needed; matching safety (pinning
+    // the gem type + level) lives in ScanEngine.BuildPriceRows.
     private static readonly string[] ExchangeTypes = ["Verisium", "Runes", "Expedition", "Currency", "UncutGems"];
 
     public PriceRepository(HttpClient http) => _http = http;
 
     public async Task InitialFetchAsync(AppConfig config)
     {
-        await FetchAndMergeAsync(config);
+        await FetchAndMergeAsync(config, _cts.Token);
     }
 
     public void StartAutoRefresh(AppConfig config)
     {
         _timer?.Dispose();
-        _timer = new System.Threading.Timer(_ => Task.Run(() => FetchAndMergeAsync(config)),
+        _timer = new System.Threading.Timer(_ => Task.Run(() => FetchAndMergeAsync(config, _cts.Token)),
             null, TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(30));
     }
 
-    private async Task FetchAndMergeAsync(AppConfig config)
+    private async Task FetchAndMergeAsync(AppConfig config, CancellationToken ct)
     {
         try
         {
             var dict = new Dictionary<string, PriceEntry>();
             foreach (var type in ExchangeTypes)
             {
-                var entries = await FetchTypeAsync(config.LeagueName, type);
+                var entries = await FetchTypeAsync(config.LeagueName, type, ct);
                 foreach (var (name, entry) in entries)
                     dict[name] = entry;
             }
@@ -57,13 +65,18 @@ internal sealed class PriceRepository : IDisposable
             LastFetchedAt = DateTime.Now;
             PricesUpdated?.Invoke();
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Shutting down — abandon this cycle quietly. (A timeout, by contrast, is not
+            // cancellation-requested, so it falls through to the log below.)
+        }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[PriceRepository] fetch failed: {ex.Message}");
         }
     }
 
-    private async Task<Dictionary<string, PriceEntry>> FetchTypeAsync(string league, string type)
+    private async Task<Dictionary<string, PriceEntry>> FetchTypeAsync(string league, string type, CancellationToken ct)
     {
         var slug = league.Replace(" ", "").ToLowerInvariant();
         var typeSlug = type.ToLowerInvariant();
@@ -75,14 +88,14 @@ internal sealed class PriceRepository : IDisposable
         req.Headers.TryAddWithoutValidation("Referer",
             $"https://poe.ninja/poe2/economy/{slug}/{typeSlug}");
 
-        var resp = await _http.SendAsync(req);
+        var resp = await _http.SendAsync(req, ct);
         if (!resp.IsSuccessStatusCode)
         {
             Console.Error.WriteLine($"[PriceRepository] {type}: HTTP {(int)resp.StatusCode}");
             return [];
         }
 
-        var json = await resp.Content.ReadAsStringAsync();
+        var json = await resp.Content.ReadAsStringAsync(ct);
         return ParseResponse(json);
     }
 
@@ -173,8 +186,10 @@ internal sealed class PriceRepository : IDisposable
 
     public void Dispose()
     {
+        _cts.Cancel();
         _timer?.Dispose();
         _timer = null;
+        _cts.Dispose();
     }
 
     private sealed class CustomPriceEntry
